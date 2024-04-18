@@ -87,9 +87,13 @@ class MyApp(QMainWindow):
         locationLayout.addWidget(self.stateComboBox, 0, 1)
         locationLayout.addWidget(QLabel("City"), 1, 0)
         self.cityListWidget = QListWidget()
+        self.cityListWidget.setSelectionMode(QListWidget.SingleSelection)  
+        self.cityListWidget.itemSelectionChanged.connect(self.on_city_selected)
         locationLayout.addWidget(self.cityListWidget, 1, 1)
         locationLayout.addWidget(QLabel("Zip Code"), 2, 0)
         self.zipcodeListWidget = QListWidget()
+        self.zipcodeListWidget.setSelectionMode(QListWidget.SingleSelection)
+        self.zipcodeListWidget.itemSelectionChanged.connect(self.on_zipcode_selected)
         locationLayout.addWidget(self.zipcodeListWidget, 2, 1)
         locationGroupBox.setLayout(locationLayout)
 
@@ -130,6 +134,7 @@ class MyApp(QMainWindow):
         filterGroupBox = QGroupBox("Filter on Categories")
         filterLayout = QVBoxLayout()
         self.filterListWidget = QListWidget()
+        self.filterListWidget.itemSelectionChanged.connect(self.on_category_selected)
 
         filterLayout.addWidget(self.filterListWidget)
         filterGroupBox.setLayout(filterLayout)
@@ -152,18 +157,18 @@ class MyApp(QMainWindow):
 
         popularGroupBox = QGroupBox("Popular Businesses (in zipcode)")
         popularLayout = QVBoxLayout()
-        self.popularBusinessTable = QTableWidget(0, 4)
+        self.popularBusinessTable = QTableWidget(0, 3)  # Three columns now
         self.popularBusinessTable.setHorizontalHeaderLabels([
-            "Business Name", "Stars", "Review Count", "# of Checkins"
+            "Business Name", "Stars", "Review Count"
         ])
         popularLayout.addWidget(self.popularBusinessTable)
         popularGroupBox.setLayout(popularLayout)
 
         successfulGroupBox = QGroupBox("Successful Businesses (in zipcode)")
         successfulLayout = QVBoxLayout()
-        self.successfulBusinessTable = QTableWidget(0, 4)
+        self.successfulBusinessTable = QTableWidget(0, 2)  # Two columns now
         self.successfulBusinessTable.setHorizontalHeaderLabels([
-            "Business Name", "Review Rating", "# of Reviews", "# of Checkins"
+            "Review Count", "Number of Checkins"
         ])
         successfulLayout.addWidget(self.successfulBusinessTable)
         successfulGroupBox.setLayout(successfulLayout)
@@ -189,7 +194,7 @@ class MyApp(QMainWindow):
     def on_state_changed(self, state):
         self.cityListWidget.clear()
         self.zipcodeListWidget.clear()
-        self.categoryListWidget.clear()
+        self.filterListWidget.clear()
         self.businessTable.setRowCount(0)  
         cities = get_cities(self.conn, state)
         for city in cities:
@@ -202,7 +207,7 @@ class MyApp(QMainWindow):
             state = self.stateComboBox.currentText()
             zipcodes = get_zipcodes(self.conn, selected_city, state)
             self.zipcodeListWidget.clear()
-            self.categoryListWidget.clear()
+            self.filterListWidget.clear()
             self.businessTable.setRowCount(0)  
             for zipcode in zipcodes:
                 self.zipcodeListWidget.addItem(zipcode[0])
@@ -222,30 +227,47 @@ class MyApp(QMainWindow):
         selected_items = self.zipcodeListWidget.selectedItems()
         if selected_items:
             selected_zipcode = selected_items[0].text()
+            
+            # Clear previous data
+            self.filterListWidget.clear()
+            self.statsTable.clearContents()
+            self.categoriesTable.clearContents()
+
+            # Load categories for the filterCategory table
             categories = get_categories(self.conn, selected_zipcode)
-            self.categoryListWidget.clear()
-            self.businessTable.setRowCount(0)  
             for category in categories:
-                self.categoryListWidget.addItem(category[0])
+                self.filterListWidget.addItem(category[0])
+
+            # Populate the number of businesses in zipcode statistics table
+            self.update_zipcode_stats(selected_zipcode)
+            
+            # Fill in the top categories table
+            self.update_top_categories(selected_zipcode)
 
     def on_category_selected(self):
-        selected_zipcode_items = self.zipcodeListWidget.selectedItems()
-        selected_category_items = self.categoryListWidget.selectedItems()
-        if selected_zipcode_items and selected_category_items:
-            selected_zipcode = selected_zipcode_items[0].text()
-            selected_category = selected_category_items[0].text()
-            self.load_businesses_by_category(selected_zipcode, selected_category)
+        selected_items = self.filterListWidget.selectedItems()
+        if selected_items:
+            selected_category = selected_items[0].text()
+            selected_zipcode_items = self.zipcodeListWidget.selectedItems()
+            if selected_zipcode_items:
+                selected_zipcode = selected_zipcode_items[0].text()
+                self.load_businesses_by_category(selected_zipcode, selected_category)
+                self.update_popular_businesses(selected_zipcode, selected_category)
+                self.update_successful_businesses(selected_zipcode, selected_category)
 
     def load_businesses_by_category(self, zipcode, category):
+        # Assuming this method already exists and works properly
+        # Fetch businesses matching the selected category and zipcode
         businesses = get_businesses_by_category(self.conn, zipcode, category)
-        self.businessTable.setRowCount(0)
+        self.businessTable.setRowCount(0)  # Clear existing rows
         for business in businesses:
             row_position = self.businessTable.rowCount()
             self.businessTable.insertRow(row_position)
+            # Assuming business has attributes: name, city, state, stars, review_count, review_rating
             for i, property in enumerate(business):
-                if i == 7: 
+                if i == 7:  # Assuming index 7 is a boolean for "is_open"
                     property = "Yes" if property else "No"
-                elif i == 8:  
+                elif i == 8:  # Assuming index 8 is a dictionary for "hours"
                     property = json.dumps(property) if isinstance(property, dict) else property
                 self.businessTable.setItem(row_position, i, QTableWidgetItem(str(property)))
 
@@ -267,48 +289,77 @@ class MyApp(QMainWindow):
 
     
     def update_zipcode_stats(self, zipcode):
+        # Query the database for the number of businesses in the zipcode
         with self.conn.cursor() as cur:
             cur.execute("""
-                SELECT COUNT(*), AVG(population), AVG(income)
-                FROM business JOIN census ON business.postal_code = census.zipcode
+                SELECT COUNT(*)
+                FROM businesses
                 WHERE postal_code = %s;
             """, (zipcode,))
-            result = cur.fetchone()
-            if result:
-                self.zipcodeStatsLabel.setText(f"Total Businesses: {result[0]}\nPopulation: {result[1]}\nAverage Income: {result[2]}")
+            business_count = cur.fetchone()[0]
+            
+            # Assume the first row is dedicated to the statistics
+            self.statsTable.setItem(0, 0, QTableWidgetItem(str(business_count)))
+
+            # ... Include additional code to populate the total population and average income ...
+
         
     
-    def update_popular_businesses(self, zipcode):
+    def update_popular_businesses(self, zipcode, category):
         with self.conn.cursor() as cur:
+            # Modify the query to include category filtering
             cur.execute("""
-                SELECT name, review_count
+                SELECT name, stars, review_count
                 FROM businesses
-                WHERE postal_code = %s
+                WHERE postal_code = %s AND categories LIKE %s
                 ORDER BY review_count DESC
                 LIMIT 5;
-            """, (zipcode,))
+            """, (zipcode, '%' + category + '%',))
             businesses = cur.fetchall()
-            self.popularBusinessListWidget.clear()
+            self.popularBusinessTable.setRowCount(0)
             for business in businesses:
-                self.popularBusinessListWidget.addItem(f"{business[0]} ({business[1]} reviews)")
-        
+                row_position = self.popularBusinessTable.rowCount()
+                self.popularBusinessTable.insertRow(row_position)
+                for i, value in enumerate(business):
+                    self.popularBusinessTable.setItem(row_position, i, QTableWidgetItem(str(value)))
+
+    def update_successful_businesses(self, zipcode, category):
+        with self.conn.cursor() as cur:
+            # Modify the query to include category filtering
+            cur.execute("""
+                SELECT review_count, "numCheckins"
+                FROM businesses
+                WHERE postal_code = %s AND categories LIKE %s
+                ORDER BY "numCheckins" DESC
+                LIMIT 5;
+            """, (zipcode, '%' + category + '%',))
+            businesses = cur.fetchall()
+            self.successfulBusinessTable.setRowCount(0)
+            for business in businesses:
+                row_position = self.successfulBusinessTable.rowCount()
+                self.successfulBusinessTable.insertRow(row_position)
+                for i, value in enumerate(business):
+                    self.successfulBusinessTable.setItem(row_position, i, QTableWidgetItem(str(value)))
+
+
     
-    def update_successful_businesses(self, zipcode):
+    def update_top_categories(self, zipcode):
+        # Assuming categories are stored in a single column separated by commas
         with self.conn.cursor() as cur:
             cur.execute("""
-                SELECT name, AVG(stars) as average_stars
-                FROM reviews
-                JOIN businesses ON businesses.id = reviews.business_id
-                WHERE businesses.postal_code = %s
-                GROUP BY businesses.name
-                ORDER BY average_stars DESC
-                LIMIT 5;
+                SELECT UNNEST(string_to_array(categories, ', ')) AS category, COUNT(*) 
+                FROM businesses 
+                WHERE postal_code = %s
+                GROUP BY UNNEST(string_to_array(categories, ', '))
+                ORDER BY COUNT(*) DESC;
             """, (zipcode,))
-            businesses = cur.fetchall()
-            self.successfulBusinessListWidget.clear()
-            for business in businesses:
-                self.successfulBusinessListWidget.addItem(f"{business[0]} ({business[1]} average stars)")
-    
+            categories = cur.fetchall()
+            
+            # Populate the categoriesTable with the categories and their business counts
+            self.categoriesTable.setRowCount(len(categories))
+            for i, (category, count) in enumerate(categories):
+                self.categoriesTable.setItem(i, 0, QTableWidgetItem(category))
+                self.categoriesTable.setItem(i, 1, QTableWidgetItem(str(count)))
 
 
 if __name__ == '__main__':
